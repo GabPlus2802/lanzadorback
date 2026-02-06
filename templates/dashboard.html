@@ -15,6 +15,18 @@
     .botado { background:#ffe5e5; }
     .permitido { background:#e6ffed; }
     .muted { color: #666; font-size: 13px; }
+
+    /* Chart */
+    .chart-wrap { margin-top: 10px; }
+    .chart-controls { display:flex; gap:10px; align-items:center; margin-top:8px; flex-wrap:wrap; }
+    .select, .btn { padding: 8px 10px; border:1px solid #ddd; border-radius: 10px; background:#fff; }
+    .btn { cursor:pointer; }
+    .bars { display:flex; gap:8px; align-items:flex-end; height: 140px; padding: 10px; border:1px solid #eee; border-radius: 12px; background:#fafafa; }
+    .bar { flex: 1; min-width: 10px; display:flex; flex-direction:column; justify-content:flex-end; }
+    .bar > div { width: 100%; border-radius: 10px 10px 4px 4px; background:#ddd; }
+    .bar-label { font-size: 11px; color:#555; margin-top:6px; text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .bar-value { font-size: 11px; color:#111; text-align:center; margin-bottom:6px; }
+    .legend { font-size:12px; color:#444; margin-top:8px; }
   </style>
 </head>
 <body>
@@ -25,10 +37,30 @@
     <div class="card">
       <div>Autos botados</div>
       <div class="big" id="botados">0</div>
+      <div class="muted" id="lastUpdated"></div>
     </div>
+
     <div class="card">
-      <div>Autos permitidos</div>
-      <div class="big" id="permitidos">0</div>
+      <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;">
+        <div>Gráfica: botados por tiempo</div>
+        <div class="muted">últimos 50 eventos</div>
+      </div>
+
+      <div class="chart-controls">
+        <label class="muted" for="bucket">Agrupar por:</label>
+        <select id="bucket" class="select">
+          <option value="minute" selected>Minuto</option>
+          <option value="hour">Hora</option>
+          <option value="day">Día</option>
+        </select>
+
+        <button class="btn" id="toggleOnlyBotados" type="button">Solo botados: ON</button>
+      </div>
+
+      <div class="chart-wrap">
+        <div id="chart" class="bars" aria-label="Gráfica de barras"></div>
+        <div class="legend" id="chartLegend"></div>
+      </div>
     </div>
   </div>
 
@@ -45,19 +77,130 @@
   </table>
 
   <script>
+    let onlyBotados = true;
+
+    const bucketSelect = document.getElementById("bucket");
+    const toggleBtn = document.getElementById("toggleOnlyBotados");
+
+    toggleBtn.addEventListener("click", () => {
+      onlyBotados = !onlyBotados;
+      toggleBtn.textContent = `Solo botados: ${onlyBotados ? "ON" : "OFF"}`;
+      refresh(); // re-render
+    });
+
+    bucketSelect.addEventListener("change", () => refresh());
+
+    function pad2(n){ return String(n).padStart(2, "0"); }
+
+    // Convierte ISO a Date (Render/Supabase entrega ISO)
+    function parseDate(iso) {
+      // isoformat puede venir con Z o con offset; Date lo parsea bien
+      const d = new Date(iso);
+      return isNaN(d.getTime()) ? null : d;
+    }
+
+    // Etiqueta del "bucket" de tiempo
+    function bucketKey(d, mode) {
+      const y = d.getFullYear();
+      const m = pad2(d.getMonth() + 1);
+      const day = pad2(d.getDate());
+      const h = pad2(d.getHours());
+      const min = pad2(d.getMinutes());
+
+      if (mode === "day") return `${y}-${m}-${day}`;
+      if (mode === "hour") return `${y}-${m}-${day} ${h}:00`;
+      return `${y}-${m}-${day} ${h}:${min}`; // minute
+    }
+
+    function buildChart(events, mode) {
+      const chart = document.getElementById("chart");
+      const legend = document.getElementById("chartLegend");
+      chart.innerHTML = "";
+      legend.textContent = "";
+
+      // Filtrar si hace falta
+      const filtered = onlyBotados
+        ? events.filter(e => e.event_type === "botado")
+        : events;
+
+      // Agrupar por bucket
+      const counts = new Map();
+      const order = []; // para mantener orden temporal
+      filtered.forEach(ev => {
+        const d = parseDate(ev.created_at);
+        if (!d) return;
+        const key = bucketKey(d, mode);
+        if (!counts.has(key)) {
+          counts.set(key, 0);
+          order.push(key);
+        }
+        // Si no es solo botados, solo contamos botados igualmente en la gráfica (según tu pedido)
+        // Si quieres contar todos, cambia la línea siguiente por: counts.set(key, counts.get(key)+1)
+        if (ev.event_type === "botado") {
+          counts.set(key, counts.get(key) + 1);
+        }
+      });
+
+      // Si no hay datos, mensaje
+      if (order.length === 0) {
+        legend.textContent = "No hay datos suficientes para graficar (aún no hay botados en los últimos eventos).";
+        return;
+      }
+
+      // Tomar últimos N buckets para que se vea bonito
+      const MAX_BARS = 12;
+      const keys = order.slice(-MAX_BARS);
+
+      let max = 0;
+      keys.forEach(k => { max = Math.max(max, counts.get(k) || 0); });
+      if (max === 0) max = 1;
+
+      keys.forEach(k => {
+        const v = counts.get(k) || 0;
+        const h = Math.round((v / max) * 100);
+
+        const bar = document.createElement("div");
+        bar.className = "bar";
+
+        const val = document.createElement("div");
+        val.className = "bar-value";
+        val.textContent = v;
+
+        const rect = document.createElement("div");
+        rect.style.height = `${h}%`;
+
+        const label = document.createElement("div");
+        label.className = "bar-label";
+        label.title = k;
+        label.textContent = k;
+
+        // Colorear botados con una tonalidad similar a tu tag (sin librerías)
+        rect.style.background = "#ffd1d1";
+
+        bar.appendChild(val);
+        bar.appendChild(rect);
+        bar.appendChild(label);
+        chart.appendChild(bar);
+      });
+
+      legend.textContent = `Mostrando botados agrupados por ${mode} (últimos ${Math.min(keys.length, MAX_BARS)} intervalos).`;
+    }
+
     async function refresh() {
-      const res = await fetch("/api/stats");
+      const res = await fetch("/api/stats", { cache: "no-store" });
       const data = await res.json();
 
       document.getElementById("botados").textContent = data.botados;
-      document.getElementById("permitidos").textContent = data.permitidos;
 
+      const now = new Date();
+      document.getElementById("lastUpdated").textContent = `Actualizado: ${now.toLocaleString()}`;
+
+      // Render tabla
       const tbody = document.getElementById("events");
       tbody.innerHTML = "";
 
-      data.last_events.forEach(ev => {
+      (data.last_events || []).forEach(ev => {
         const tr = document.createElement("tr");
-
         const tagClass = ev.event_type === "botado" ? "botado" : "permitido";
         tr.innerHTML = `
           <td><span class="tag ${tagClass}">${ev.event_type}</span></td>
@@ -66,6 +209,10 @@
         `;
         tbody.appendChild(tr);
       });
+
+      // Render gráfica
+      const mode = bucketSelect.value;
+      buildChart(data.last_events || [], mode);
     }
 
     refresh();
