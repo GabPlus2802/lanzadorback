@@ -1,25 +1,21 @@
+import os
 from flask import Flask, request, jsonify, render_template
 import psycopg2
 import psycopg2.extras
-import json
 
 app = Flask(__name__)
 
 # =========================
-# CONFIG desde archivo secreto
+# SUPABASE (Render ENV VARS)
 # =========================
-# Render: montaremos este archivo como secret en /etc/secrets/db.json
-CONFIG_PATH = "/etc/secrets/db.json"
-
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    cfg = json.load(f)
-
-DB_USER = cfg["DB_USER"]
-DB_PASSWORD = cfg["DB_PASSWORD"]
-DB_HOST = cfg["DB_HOST"]
-DB_PORT = int(cfg["DB_PORT"])
-DB_NAME = cfg["DB_NAME"]
-DB_SSLMODE = cfg.get("DB_SSLMODE", "require")
+# Configura estas variables en Render:
+# DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME, DB_SSLMODE (opcional)
+DB_USER = os.environ["DB_USER"]
+DB_PASSWORD = os.environ["DB_PASSWORD"]
+DB_HOST = os.environ["DB_HOST"]
+DB_PORT = int(os.environ["DB_PORT"])
+DB_NAME = os.environ["DB_NAME"]
+DB_SSLMODE = os.environ.get("DB_SSLMODE", "require")  # Supabase requiere SSL
 
 def get_conn():
     return psycopg2.connect(
@@ -28,7 +24,7 @@ def get_conn():
         host=DB_HOST,
         port=DB_PORT,
         dbname=DB_NAME,
-        sslmode=DB_SSLMODE,
+        sslmode=DB_SSLMODE
     )
 
 def init_db():
@@ -50,11 +46,21 @@ def init_db():
     cur.close()
     conn.close()
 
-# Render ejecuta múltiples workers: esto es seguro porque usamos IF NOT EXISTS
+# Crear/asegurar tabla al iniciar
+# (Seguro aunque Render levante varios workers, por IF NOT EXISTS)
 init_db()
 
 @app.post("/api/event")
 def api_event():
+    """
+    Recibe JSON:
+    {
+      "event_type": "botado" | "permitido",
+      "sensor_value": 1234,
+      "device_id": "esp32-01",   (opcional)
+      "lane_id": "entrada-1"     (opcional)
+    }
+    """
     data = request.get_json(force=True, silent=True) or {}
 
     event_type = data.get("event_type")
@@ -71,7 +77,9 @@ def api_event():
         INSERT INTO public.events (event_type, sensor_value, device_id, lane_id)
         VALUES (%s, %s, %s, %s)
         RETURNING id, created_at
-    """, (event_type, sensor_value, device_id, lane_id))
+    """, (event_type, sensor_value, sensor_value if False else device_id, lane_id))
+    # Nota: la parte "sensor_value if False else device_id" es para evitar errores de copia,
+    # NO cambia nada (siempre toma device_id). Si quieres, cámbialo por simplemente device_id.
     row = cur.fetchone()
     conn.commit()
     cur.close()
@@ -105,12 +113,17 @@ def api_stats():
         if ev.get("created_at"):
             ev["created_at"] = ev["created_at"].isoformat()
 
-    return jsonify({"botados": botados, "permitidos": permitidos, "last_events": last_events})
+    return jsonify({
+        "botados": botados,
+        "permitidos": permitidos,
+        "last_events": last_events
+    })
 
 @app.get("/")
 def dashboard():
     return render_template("dashboard.html")
 
-# Render usa gunicorn; esto es solo para local
 if __name__ == "__main__":
-    app.ru
+    # Local: python app.py
+    # Render: gunicorn app:app
+    app.run(host="0.0.0.0", port=5000, debug=True)
