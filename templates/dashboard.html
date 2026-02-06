@@ -16,16 +16,11 @@
     .permitido { background:#e6ffed; }
     .muted { color: #666; font-size: 13px; }
 
-    /* Chart */
     .chart-wrap { margin-top: 10px; }
     .chart-controls { display:flex; gap:10px; align-items:center; margin-top:8px; flex-wrap:wrap; }
     .select, .btn { padding: 8px 10px; border:1px solid #ddd; border-radius: 10px; background:#fff; }
     .btn { cursor:pointer; }
-    .bars { display:flex; gap:8px; align-items:flex-end; height: 140px; padding: 10px; border:1px solid #eee; border-radius: 12px; background:#fafafa; }
-    .bar { flex: 1; min-width: 10px; display:flex; flex-direction:column; justify-content:flex-end; }
-    .bar > div { width: 100%; border-radius: 10px 10px 4px 4px; background:#ddd; }
-    .bar-label { font-size: 11px; color:#555; margin-top:6px; text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .bar-value { font-size: 11px; color:#111; text-align:center; margin-bottom:6px; }
+    canvas { width: 100%; height: 190px; border: 1px solid #eee; border-radius: 12px; background:#fafafa; }
     .legend { font-size:12px; color:#444; margin-top:8px; }
   </style>
 </head>
@@ -42,23 +37,29 @@
 
     <div class="card">
       <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;">
-        <div>Gráfica: botados por tiempo</div>
+        <div>Historia de botados (línea)</div>
         <div class="muted">últimos 50 eventos</div>
       </div>
 
       <div class="chart-controls">
-        <label class="muted" for="bucket">Agrupar por:</label>
+        <label class="muted" for="mode">Modo:</label>
+        <select id="mode" class="select">
+          <option value="cumulative" selected>Acumulado</option>
+          <option value="perBucket">Por intervalo</option>
+        </select>
+
+        <label class="muted" for="bucket">Intervalo:</label>
         <select id="bucket" class="select">
           <option value="minute" selected>Minuto</option>
           <option value="hour">Hora</option>
           <option value="day">Día</option>
         </select>
 
-        <button class="btn" id="toggleOnlyBotados" type="button">Solo botados: ON</button>
+        <button class="btn" id="redraw" type="button">Redibujar</button>
       </div>
 
       <div class="chart-wrap">
-        <div id="chart" class="bars" aria-label="Gráfica de barras"></div>
+        <canvas id="chart" width="900" height="220"></canvas>
         <div class="legend" id="chartLegend"></div>
       </div>
     </div>
@@ -77,29 +78,19 @@
   </table>
 
   <script>
-    let onlyBotados = true;
-
+    const modeSelect = document.getElementById("mode");
     const bucketSelect = document.getElementById("bucket");
-    const toggleBtn = document.getElementById("toggleOnlyBotados");
+    const redrawBtn = document.getElementById("redraw");
 
-    toggleBtn.addEventListener("click", () => {
-      onlyBotados = !onlyBotados;
-      toggleBtn.textContent = `Solo botados: ${onlyBotados ? "ON" : "OFF"}`;
-      refresh(); // re-render
-    });
-
-    bucketSelect.addEventListener("change", () => refresh());
+    redrawBtn.addEventListener("click", () => refresh());
 
     function pad2(n){ return String(n).padStart(2, "0"); }
 
-    // Convierte ISO a Date (Render/Supabase entrega ISO)
     function parseDate(iso) {
-      // isoformat puede venir con Z o con offset; Date lo parsea bien
       const d = new Date(iso);
       return isNaN(d.getTime()) ? null : d;
     }
 
-    // Etiqueta del "bucket" de tiempo
     function bucketKey(d, mode) {
       const y = d.getFullYear();
       const m = pad2(d.getMonth() + 1);
@@ -109,81 +100,201 @@
 
       if (mode === "day") return `${y}-${m}-${day}`;
       if (mode === "hour") return `${y}-${m}-${day} ${h}:00`;
-      return `${y}-${m}-${day} ${h}:${min}`; // minute
+      return `${y}-${m}-${day} ${h}:${min}`;
     }
 
-    function buildChart(events, mode) {
-      const chart = document.getElementById("chart");
-      const legend = document.getElementById("chartLegend");
-      chart.innerHTML = "";
-      legend.textContent = "";
+    // Convierte eventos -> serie temporal
+    function buildSeries(lastEvents, mode, bucketMode) {
+      // Orden cronológico (API viene DESC)
+      const events = [...lastEvents].reverse();
 
-      // Filtrar si hace falta
-      const filtered = onlyBotados
-        ? events.filter(e => e.event_type === "botado")
-        : events;
+      // Solo botados, con timestamp válido
+      const botados = events
+        .filter(e => e.event_type === "botado")
+        .map(e => ({ t: parseDate(e.created_at), raw: e }))
+        .filter(e => e.t);
 
-      // Agrupar por bucket
+      if (botados.length === 0) return { points: [], labels: [] };
+
+      if (mode === "cumulative") {
+        // Un punto por botado: (tiempo, acumulado)
+        let acc = 0;
+        const points = botados.map(e => {
+          acc += 1;
+          return { t: e.t, y: acc };
+        });
+        return { points, labels: [] };
+      }
+
+      // perBucket: agrupar botados por minuto/hora/día
       const counts = new Map();
-      const order = []; // para mantener orden temporal
-      filtered.forEach(ev => {
-        const d = parseDate(ev.created_at);
-        if (!d) return;
-        const key = bucketKey(d, mode);
+      const order = [];
+      botados.forEach(e => {
+        const key = bucketKey(e.t, bucketMode);
         if (!counts.has(key)) {
           counts.set(key, 0);
           order.push(key);
         }
-        // Si no es solo botados, solo contamos botados igualmente en la gráfica (según tu pedido)
-        // Si quieres contar todos, cambia la línea siguiente por: counts.set(key, counts.get(key)+1)
-        if (ev.event_type === "botado") {
-          counts.set(key, counts.get(key) + 1);
-        }
+        counts.set(key, counts.get(key) + 1);
       });
 
-      // Si no hay datos, mensaje
-      if (order.length === 0) {
-        legend.textContent = "No hay datos suficientes para graficar (aún no hay botados en los últimos eventos).";
+      // construir puntos “equiespaciados” (x = índice), con labels de tiempo
+      const points = order.map((k, idx) => ({ x: idx, y: counts.get(k) || 0, label: k }));
+      return { points, labels: order };
+    }
+
+    function drawLineChart(canvas, series, titleText) {
+      const ctx = canvas.getContext("2d");
+
+      // Ajuste retina / alta densidad
+      const cssW = canvas.clientWidth || 900;
+      const cssH = canvas.clientHeight || 220;
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(cssW * dpr);
+      canvas.height = Math.round(cssH * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      const W = cssW;
+      const H = cssH;
+
+      // Layout
+      const padL = 44, padR = 16, padT = 16, padB = 28;
+      const innerW = W - padL - padR;
+      const innerH = H - padT - padB;
+
+      // Clear
+      ctx.clearRect(0, 0, W, H);
+
+      // Fondo
+      ctx.fillStyle = "#fafafa";
+      ctx.fillRect(0, 0, W, H);
+
+      // Si no hay datos
+      if (!series || series.length === 0) {
+        ctx.fillStyle = "#666";
+        ctx.font = "13px system-ui, Arial";
+        ctx.fillText("Sin datos de botados en los últimos eventos.", padL, padT + 20);
         return;
       }
 
-      // Tomar últimos N buckets para que se vea bonito
-      const MAX_BARS = 12;
-      const keys = order.slice(-MAX_BARS);
+      // Preparar x/y
+      let xs = [];
+      let ys = [];
 
-      let max = 0;
-      keys.forEach(k => { max = Math.max(max, counts.get(k) || 0); });
-      if (max === 0) max = 1;
+      const isTimeSeries = series[0].t instanceof Date;
 
-      keys.forEach(k => {
-        const v = counts.get(k) || 0;
-        const h = Math.round((v / max) * 100);
+      if (isTimeSeries) {
+        xs = series.map(p => p.t.getTime());
+        ys = series.map(p => p.y);
+      } else {
+        xs = series.map(p => p.x);
+        ys = series.map(p => p.y);
+      }
 
-        const bar = document.createElement("div");
-        bar.className = "bar";
+      const xMin = Math.min(...xs), xMax = Math.max(...xs);
+      const yMin = 0;
+      const yMax = Math.max(1, Math.max(...ys));
 
-        const val = document.createElement("div");
-        val.className = "bar-value";
-        val.textContent = v;
+      function xToPx(x) {
+        const t = (xMax === xMin) ? 0.5 : (x - xMin) / (xMax - xMin);
+        return padL + t * innerW;
+      }
+      function yToPx(y) {
+        const t = (y - yMin) / (yMax - yMin);
+        return padT + (1 - t) * innerH;
+      }
 
-        const rect = document.createElement("div");
-        rect.style.height = `${h}%`;
+      // Grid Y (4 líneas)
+      ctx.strokeStyle = "#e9e9e9";
+      ctx.lineWidth = 1;
+      ctx.font = "11px system-ui, Arial";
+      ctx.fillStyle = "#666";
+      for (let i = 0; i <= 4; i++) {
+        const yVal = Math.round((yMax * i) / 4);
+        const y = yToPx(yVal);
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(W - padR, y);
+        ctx.stroke();
+        ctx.fillText(String(yVal), 10, y + 4);
+      }
 
-        const label = document.createElement("div");
-        label.className = "bar-label";
-        label.title = k;
-        label.textContent = k;
+      // Área bajo la curva (suave y simple)
+      ctx.beginPath();
+      series.forEach((p, i) => {
+        const x = xToPx(isTimeSeries ? p.t.getTime() : p.x);
+        const y = yToPx(p.y);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      // cerrar área
+      ctx.lineTo(xToPx(isTimeSeries ? xs[xs.length - 1] : xs[xs.length - 1]), yToPx(0));
+      ctx.lineTo(xToPx(isTimeSeries ? xs[0] : xs[0]), yToPx(0));
+      ctx.closePath();
+      ctx.fillStyle = "rgba(255, 209, 209, 0.9)";
+      ctx.fill();
 
-        // Colorear botados con una tonalidad similar a tu tag (sin librerías)
-        rect.style.background = "#ffd1d1";
+      // Línea
+      ctx.beginPath();
+      series.forEach((p, i) => {
+        const x = xToPx(isTimeSeries ? p.t.getTime() : p.x);
+        const y = yToPx(p.y);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = "#c44";
+      ctx.lineWidth = 2;
+      ctx.stroke();
 
-        bar.appendChild(val);
-        bar.appendChild(rect);
-        bar.appendChild(label);
-        chart.appendChild(bar);
+      // Puntos
+      ctx.fillStyle = "#c44";
+      series.forEach(p => {
+        const x = xToPx(isTimeSeries ? p.t.getTime() : p.x);
+        const y = yToPx(p.y);
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
       });
 
-      legend.textContent = `Mostrando botados agrupados por ${mode} (últimos ${Math.min(keys.length, MAX_BARS)} intervalos).`;
+      // Etiquetas X (solo 2-3 para no saturar)
+      ctx.fillStyle = "#666";
+      ctx.font = "11px system-ui, Arial";
+
+      if (isTimeSeries) {
+        const first = series[0].t;
+        const mid = series[Math.floor(series.length / 2)].t;
+        const last = series[series.length - 1].t;
+
+        const fmt = d => `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+        const labels = [
+          { t: first.getTime(), txt: fmt(first) },
+          { t: mid.getTime(), txt: fmt(mid) },
+          { t: last.getTime(), txt: fmt(last) },
+        ];
+        labels.forEach(l => {
+          const x = xToPx(l.t);
+          ctx.fillText(l.txt, Math.max(padL, Math.min(x - 22, W - padR - 50)), H - 10);
+        });
+      } else {
+        // para buckets: usar primero/medio/último label
+        const first = series[0].label || "";
+        const mid = series[Math.floor(series.length / 2)].label || "";
+        const last = series[series.length - 1].label || "";
+        const labels = [
+          { x: series[0].x, txt: first },
+          { x: series[Math.floor(series.length / 2)].x, txt: mid },
+          { x: series[series.length - 1].x, txt: last },
+        ];
+        labels.forEach(l => {
+          const x = xToPx(l.x);
+          ctx.fillText(l.txt, Math.max(padL, Math.min(x - 40, W - padR - 80)), H - 10);
+        });
+      }
+
+      // Título
+      ctx.fillStyle = "#333";
+      ctx.font = "12px system-ui, Arial";
+      ctx.fillText(titleText, padL, 12);
     }
 
     async function refresh() {
@@ -195,10 +306,9 @@
       const now = new Date();
       document.getElementById("lastUpdated").textContent = `Actualizado: ${now.toLocaleString()}`;
 
-      // Render tabla
+      // tabla
       const tbody = document.getElementById("events");
       tbody.innerHTML = "";
-
       (data.last_events || []).forEach(ev => {
         const tr = document.createElement("tr");
         const tagClass = ev.event_type === "botado" ? "botado" : "permitido";
@@ -210,13 +320,29 @@
         tbody.appendChild(tr);
       });
 
-      // Render gráfica
-      const mode = bucketSelect.value;
-      buildChart(data.last_events || [], mode);
+      // gráfica historia
+      const mode = modeSelect.value;       // cumulative / perBucket
+      const bucketMode = bucketSelect.value; // minute / hour / day
+
+      const { points } = buildSeries(data.last_events || [], mode, bucketMode);
+
+      const canvas = document.getElementById("chart");
+      const legend = document.getElementById("chartLegend");
+
+      if (mode === "cumulative") {
+        legend.textContent = "Botados acumulados a través del tiempo (con los últimos eventos disponibles).";
+        drawLineChart(canvas, points, "Acumulado");
+      } else {
+        legend.textContent = `Botados por ${bucketMode} (con los últimos eventos disponibles).`;
+        drawLineChart(canvas, points, `Por ${bucketMode}`);
+      }
     }
 
     refresh();
     setInterval(refresh, 2000);
+
+    // Redibuja al cambiar tamaño de ventana
+    window.addEventListener("resize", () => refresh());
   </script>
 </body>
 </html>
