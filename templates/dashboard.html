@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dashboard - Control de Autos</title>
+  <style>
+    body { font-family: system-ui, Arial; margin: 20px; }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap: 12px; }
+    .card { padding: 16px; border: 1px solid #ddd; border-radius: 12px; }
+    .big { font-size: 42px; font-weight: 700; margin-top: 8px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+    th, td { border-bottom: 1px solid #eee; padding: 10px; text-align: left; }
+    .tag { display:inline-block; padding:4px 10px; border-radius: 999px; font-size: 12px; }
+    .botado { background:#ffe5e5; }
+    .permitido { background:#e6ffed; }
+    .muted { color: #666; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Dashboard - Control de Autos</h1>
+  <p class="muted">Se actualiza automáticamente cada 2 segundos.</p>
+
+  <div class="cards">
+    <div class="card">
+      <div>Autos botados</div>
+      <div class="big" id="botados">0</div>
+    </div>
+    <div class="card">
+      <div>Autos permitidos</div>
+      <div class="big" id="permitidos">0</div>
+    </div>
+  </div>
+
+  <h2>Últimos eventos</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Tipo</th>
+        <th>Valor sensor</th>
+        <th>Fecha y hora</th>
+      </tr>
+    </thead>
+    <tbody id="events"></tbody>
+  </table>
+
+  <script>
+    async function refresh() {
+      const res = await fetch("/api/stats");
+      const data = await res.json();
+
+      document.getElementById("botados").textContent = data.botados;
+      document.getElementById("permitidos").textContent = data.permitidos;
+
+      const tbody = document.getElementById("events");
+      tbody.innerHTML = "";
+
+      data.last_events.forEach(ev => {
+        const tr = document.createElement("tr");
+
+        const tagClass = ev.event_type === "botado" ? "botado" : "permitido";
+        tr.innerHTML = `
+          <td><span class="tag ${tagClass}">${ev.event_type}</span></td>
+          <td>${ev.sensor_value ?? ""}</td>
+          <td>${ev.created_at}</td>
+        `;
+        tbody.appendChild(tr);
+      });
+    }
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>
